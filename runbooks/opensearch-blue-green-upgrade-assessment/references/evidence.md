@@ -1,0 +1,33 @@
+# Evidence — what this runbook rests on, and what it does not
+
+Every step in `SKILL.md` traces to a replication, an engagement observation, or a reputable source. A step resting on inference is reason to leave a procedure unwritten rather than to label it. This file records which is which, so a reader can judge how far to trust each part.
+
+Every step in this document traces to a reputable source. A step resting on inference is reason to leave a procedure unwritten rather than to label it.
+
+**Basis.**
+
+- **Published managed-service documentation** for the blue/green definition and the no-data-loss switchover; the stage vocabulary quoted in step 2; the documented performance impact and the temporary node-count doubling; the three-step upgrade process and the 15-minutes-to-several-hours expectation; the dry-run gate with its verbose mode, deployment types, retention and overwrite behaviour; the validation-code table and the Critical versus Warning severity model with `AcceptedWarnings`; the shard-count and shard-size guidance with units, including 25 shards per GiB of heap, the per-version node ceilings, and the 10–30 and 30–50 GiB bands with a 50 GiB maximum; the statement that shard sizes over 50 GB increase copy time; the upgrade blocker list; the version-specific 2.19-to-3.x prerequisites; and the restriction of `PUT /_cluster/settings` to an enumerated allowlist that excludes the recovery-throughput settings.
+- **Published API references** for `DescribeDomainChangeProgress` and its stage, status and enum fields, and for `GetUpgradeStatus` with its `UpgradeStep` and `StepStatus` enums.
+- **Published knowledge-base articles** for the diagnostic spine this runbook follows, for `bytes_percent` as the healthy-relocation indicator, for the 24-hour reach-out threshold, for the absence of pause or cancel, for automatic restoration from the pre-upgrade snapshot on failure, and for shards pinned to nodes blocking migration.
+- **Published engine documentation** for the green, yellow and red definitions and the worst-shard-sets-index-status rule; the cluster health fields; the CAT recovery, shards, allocation and nodes routes; the allocation-explain route with its decider output; and the shard-allocation-filtering semantics for `include`, `exclude` and `require`.
+
+**Replicated in part.** `metadata.verification` stays `documented` because the procedure has not been exercised end to end as written, but several steps have been observed working in a support engagement and are no longer documentation-only:
+
+- The control-plane progress read, which served as the primary progress signal, returning the stage array with `Name`, `Status`, `Description` and `LastUpdated`, and carrying the copy counter inside `Description`. The upgrade-status route was not used in the same engagement.
+- `bytes_percent` running behind `files_percent` on live peer recoveries — the empirical basis for step 3's warning rather than only a documentation claim.
+- A stalled copy phase presenting both with an empty active-recovery table while shards read `RELOCATING`, and with a green cluster status. Those two observations drove the warnings in steps 3 and 5.
+- The wildcard settings write being rejected, and recovery-throughput settings being read back by operators rather than written by them.
+
+**Not established.**
+
+- **Yellow status as expected behaviour of a blue/green.** No published source says it. Published yellow explanations cover node failure, transient restarts, scheduled maintenance and replica capacity. Step 5 reports yellow for what it is and sends persistent yellow to the allocation explanation rather than excusing it.
+- **A named "cutover" phase, and Dashboards unavailability tied to a specific phase.** The published vocabulary has traffic-routing stages, and the Dashboards statement is scoped to the whole upgrade rather than to a phase. This runbook does not assert phase-specific Dashboards behaviour, and a Dashboards failure should still be checked against cluster status and write-block metrics before anyone calls it benign.
+- **Shard density per node as a cause of a *slow* copy phase.** What is published is that density **blocks** the move, through the validation codes and the per-node ceiling, and that shard **size** above 50 GB **slows** it. No published source converts density into a duration, so this runbook compares density against thresholds and never estimates time from it.
+- **Any expected duration for the copy phase.** The only published bounds are conditioned on cluster load and size. The 24-hour stuck-state threshold is the reach-out trigger precisely because no duration estimate is available.
+- **A formally published Cluster Insights finding catalogue.** One worked example is named publicly; specific insight names beyond that are not something to cite.
+- **A documented column list for `_cat/shards`.** The route and its column-selection parameter are documented, but the column names are not enumerated, so the unassigned-reason column rests on its use in published guidance. The authoritative route for that reason is the allocation explanation.
+- **A superseded claim to avoid.** Stripping `index.routing.allocation.include._tier_preference` from indexes before an upgrade has circulated as the pre-flight fix. Treat it as unverified for this engine: the attribute is absent from the published built-in attribute list, and **code analysis of the published implementation contradicts the causal claim** — the index-filter decider passes all three filter groups through a helper that strips every key prefixed `_tier` before evaluating them, so an index whose only include filter is that attribute has no index filter left to block it. The attribute appears in the published API schema with no behavioural description, and it *is* documented in a related engine where it can conflict with other allocation settings — which is the likely origin of the advice. Step 1 and step 4 therefore have you discover the responsible attribute rather than assume it.
+
+- **Why the copy phase stalls.** No root cause was established in the engagement this evidence comes from. This runbook tells you how to distinguish stalled from slow and what evidence to hand over; it does not claim a mechanism.
+
+**To raise the level.** Exercise steps 2 through 5 against a non-production domain during a deliberately triggered blue/green, confirm the stage names and the `bytes_percent` behaviour match what is written here, then set `verification: replicated` and record the version tested. Inducing a blocked copy phase by setting an allocation filter on a test index would additionally exercise step 4's `filter` branch end to end.
