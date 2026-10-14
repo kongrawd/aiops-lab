@@ -1,0 +1,28 @@
+# Evidence — what this runbook rests on, and what it does not
+
+Every step in `SKILL.md` traces to a replication, an engagement observation, or a reputable source. A step resting on inference is reason to leave a procedure unwritten rather than to label it. This file records which is which, so a reader can judge how far to trust each part.
+
+Every step in this document traces to a reputable source. A step resting on inference is reason to leave a procedure unwritten rather than to label it.
+
+**Basis.**
+
+- **Published OpenSearch documentation** for the requirement that a detector's alias data source must have a designated write index, and that documents must be ingested through the alias rather than the concrete index; for the behaviour that an alias over several indices rejects writes until one is designated, and that a single referenced index behaves as the write index until a second is referenced; for the atomicity of combined alias actions; and for every route and field used — the alias management route and its `is_write_index` body field, the CAT aliases columns, the CAT indices `creation.date` columns, the detector search route, and the findings search route.
+- **Code analysis** of the published implementation, which is the source for there being no fallback: `alerting/src/main/kotlin/org/opensearch/alerting/util/IndexUtils.kt`, function `getWriteIndex`, returns the alias's designated write index or `null`, with no selection by creation date or size. Its callers are the doc-level monitor runner and the metadata service that builds the per-index position record, which is what ties a missing designation to nothing being scanned.
+- **A merged upstream change** whose own description states the cast-failure chain behind the update symptom, and that the monitor cannot then be updated or re-enabled. **A separate public issue** establishes a different precondition for the same error string, which is the basis for step 1 identifying the situation by alias state rather than by the error.
+
+**Replicated in part.** `metadata.verification` stays `documented` because the procedure has not been exercised end to end as written, but several elements have been observed on live clusters in support engagements and are no longer documentation-only:
+
+- The alias listing in step 1, run many times across two live clusters and a test cluster, returning exactly the requested columns and rendering an unset flag as `-`. The multi-member-with-no-write-index state was observed directly.
+- The reproduction condition, tightened against observation: it reproduces with two or more members and the flag unset on all, **or** with exactly one member explicitly set `false`. A single member with the flag merely unset does **not** reproduce it.
+- On a controlled test cluster, documents written to the designated write index produced findings while documents written directly to other members produced none — which is the clearest available confirmation of the mechanism in the impact section.
+- That correcting the alias does not recover a detector which has already recorded an empty position, confirmed as expected behaviour after an update still failed post-fix. This is the basis for step 5.
+- That the mappings endpoint can return a complete alias set while detection is dead, and that `size=0` returns an empty array with a non-zero total.
+
+**Not established.**
+
+- **Whether an alias resolves to the most recently created member when none is designated. Two sources disagree and both are recorded.** Support-engagement notes state the detector falls back to the most recently created member and reads mappings from that index alone. Against that: the published alias documentation states the outcome is no write index at all, and code analysis of the write-index lookup shows it returns the designated member or nothing, with no selection by creation date. A creation-date filter does exist in the implementation, but it narrows the scan set at run time rather than substituting for a write index — which is the most likely origin of the belief. **This runbook does not depend on the answer:** step 1 branches on the observed alias state, and the remediation is to designate a write index either way. Do not build a procedure on the fallback.
+- **Whether correcting the alias also restores a detector that has already become un-editable.** The empty position record is persisted before the fix, so whether a later update succeeds is not something the published sources settle. Step 5 and the escalation treat these as two outcomes rather than assuming one follows from the other.
+- **Whether recreating a detector preserves its findings and alert history. Sources differ on how firmly this is known.** One engagement record states plainly that recreating a detector clears its existing findings and alert history, and that changing a detector's data-source input also resets them. Another review of the case record found no explicit statement either way and only indirect indicators. No public documentation addresses it. **Plan on losing the history** and export anything you need before recreating — but treat the claim as engagement-recorded rather than vendor-documented.
+- **Which released builds carry the update fix.** Backports to the release lines were open at the time of writing. Read your own build.
+
+**To raise the level.** Exercise steps 1 to 4 against a test alias with two members and no designation, confirm detection resumes after designating one, then set `verification: replicated` and record the version tested. The merged upstream change carries a test that builds exactly this alias shape, which is a usable starting point.
