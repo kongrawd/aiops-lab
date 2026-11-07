@@ -46,11 +46,15 @@ The unmistakable signal that this is the right runbook. Word it as the alert wor
 
 *Fails when* it names a category rather than a condition. "Service degradation" matches everything and therefore selects nothing. "Replica lag above 60s for 10 minutes, writes still succeeding" selects one runbook.
 
+**State version differences as behaviour, not as a range.** Where a procedure's relevance turns on a version, give the operator the difference: what the system does without the change, what it does with it, and the command that tells them which they have. A bare `applies_to_versions` strands anyone on an unlisted version, and the numbers decay as backports land while the behavioural difference does not.
+
+*Fails when* it promises a release. "Fixed in the next version" dates immediately and is often wrong — fixes get backported unevenly or abandoned. Describe the two behaviours and have the reader check their own build.
+
 **Include a does-not-apply line.** The near-miss case is where the wrong runbook gets run, and naming it with a link costs one sentence. This is especially valuable where several failures share an error string — a symptom with multiple causes needs a discriminator, not a guess.
 
 ### Impact
 
-See [Quantifying impact](#quantifying-impact). This section exists so the operator can judge urgency and write the first status update without escalating to ask.
+See [Quantifying impact](#quantifying-impact). This section exists so the operator can judge urgency and write the first status update without having to ask.
 
 *Fails when* written as a possibility rather than a measurement. Also fails when it omits **recoverability** — whether the damage can be undone afterwards changes how hard the operator should push and whether a slower, safer path is acceptable.
 
@@ -66,7 +70,7 @@ Numbered, imperative, second person. One action per step — a step needing two 
 
 Each step carries: the **exact command** in a code block, the **literal expected output**, and where relevant the **branch** on that output. The operator should not have to interpret the result; the runbook interprets it for them. Where a value must be substituted, mark it unmistakably (`<cluster-name>`) and say where to get it.
 
-**Step 1 is always a confirmation that the problem is real,** and it must say what to do when the check comes back clean. Recovery procedures run against healthy systems are a reliable way to escalate a minor alert into an outage.
+**Step 1 is always a confirmation that the problem is real,** and it must say what to do when the check comes back clean. Recovery procedures run against healthy systems are a reliable way to turn a minor alert into an outage.
 
 Mark any state-changing step visibly and put its rollback immediately beneath it.
 
@@ -90,9 +94,9 @@ For high-risk procedures, write the **rollback of the rollback**. The alternativ
 
 ### If this does not work
 
-Escalation with a clock, a route, and the evidence to attach. The clock matters because an operator out of steps with no instruction will improvise at the worst possible hour. The evidence list matters because it stops the next responder starting from zero.
+Reaching out, with a clock, a route, and the evidence to attach. The clock matters because an operator out of steps with no instruction will improvise at the worst possible hour. The evidence list matters because it stops the next responder starting from zero.
 
-Tie this to the existing escalation policy rather than inventing a competing one inside the document.
+Tie this to your organisation's existing support or on-call policy rather than inventing a competing one inside the document.
 
 ### Related runbooks
 
@@ -140,7 +144,7 @@ Condensed, to show the shape rather than to be copied verbatim.
 > ```
 > kubectl -n prod get certificate www-tls -o jsonpath='{.spec.issuerRef.name}{"\n"}'
 > ```
-> `letsencrypt-prod` → step 3. Anything else → this certificate is manual, go to **Escalate**.
+> `letsencrypt-prod` → step 3. Anything else → this certificate is manual, go to **Reach out**.
 >
 > **Step 3 — force renewal.**
 > ```
@@ -150,9 +154,9 @@ Condensed, to show the shape rather than to be copied verbatim.
 >
 > **Validation.** Within 5 minutes, `kubectl -n prod get certificate www-tls` shows `READY=True` and `NOT AFTER` ~90 days out. Then re-run the step 1 command against the live endpoint and confirm the new date is being served. Close the alert.
 >
-> **Escalate.** If `READY` is not `True` 20 minutes after step 3, or the certificate is manually issued, or under 24 hours remain at any point: contact the platform owner and post a status notice. Do not wait for expiry to communicate.
+> **Reach out.** If `READY` is not `True` 20 minutes after step 3, or the certificate is manually issued, or under 24 hours remain at any point: contact the platform owner and post a status notice. Do not wait for expiry to communicate.
 
-Note what the example does: branches on an observed value, states expected output literally, declares the rollback as "none needed" rather than omitting the heading, validates from two angles (resource then live endpoint), and escalates on a timer with permission to stop.
+Note what the example does: branches on an observed value, states expected output literally, declares the rollback as "none needed" rather than omitting the heading, validates from two angles (resource then live endpoint), and reaches out on a timer with permission to stop.
 
 ## Splitting and linking
 
@@ -164,7 +168,7 @@ A branch becomes its own runbook when any of these is true:
 | Different safety profile | A destructive branch needs its own pre-flight and rollback |
 | Needs its own pre-flight | The main pre-flight would have to cover conditions most readers never hit |
 | Cause is unknown | That is a playbook — investigation, not execution (OPS07-BP04) |
-| Only the vendor can act | That is an escalation step, with evidence to attach |
+| Only the vendor can act | That is a reach-out step, with evidence to attach |
 
 Keep the main path short and linear, with branches hanging off it by name. Nesting a long branch inline is what turns a two-minute document into a ten-minute one.
 
@@ -187,10 +191,15 @@ One thing worth adding here, because it is a choice made while drafting: the dim
 - [ ] **Every state-changing step has its rollback beside it,** and states what the rollback does not restore.
 - [ ] **Exit criteria are an observation,** not "should recover."
 - [ ] **Validation checks two independent things,** so one metric moving for the wrong reason cannot fake success.
-- [ ] **Escalation has a clock, a route, and an evidence list.**
+- [ ] **Reaching out has a clock, a route, and an evidence list.**
 - [ ] **Branches are explicit,** and the ones that left are linked by name.
 - [ ] **Every command is executable by any reader of the published document** — no internal tooling, no internal dashboards.
 - [ ] **Permissions appear in the pre-flight,** not as an assumption.
+- [ ] **Version-dependent behaviour is stated as a difference** the operator can observe, with the check that tells them which side they are on — not only as a range in the frontmatter.
+- [ ] **Every absence is interpretable.** Each step that reads a negative result — zero hits, a missing field, an empty array, an empty table — has something upstream proving the check can see the thing at all.
+- [ ] **Expected output is the literal rendering,** not the semantic value.
+- [ ] **Each remediation has an exit for "applied, but the symptom persists."**
+- [ ] **`read_only` was verified by walking the steps,** not by scanning for write verbs — dry runs, acknowledgements and "disable it and compare" are writes.
 - [ ] **`read_only` matches the procedure.** If `true`, no step writes and there is no rollback section; if `false`, every state-changing step is marked and has its rollback beside it.
 - [ ] **`metadata.verification` is `replicated` or `documented`,** and matches what the Verification status section says.
 - [ ] **Verification status names the source class** and says which steps are replicated and which are documented.
@@ -208,11 +217,11 @@ A runbook that has been executed many times with no remaining decision points is
 
 ## Sources
 
-Practitioner consensus on the section shape, the cold-read test, confirming the symptom first, rollback adjacency, exit criteria and timed escalation is drawn from current runbook-writing guidance (Raccoon Page, *How to write a runbook your on-call will actually use*, 2026-05; On Call Journal, *Runbook Template for Production Support Teams*, 2026-09; Pulsetic, *Runbooks: How to Write One That Works at 3am*; Webalert, *Incident Runbook Template*, 2026-03; AIOps SRE, *SRE Runbook Template*).
+Practitioner consensus on the section shape, the cold-read test, confirming the symptom first, rollback adjacency, exit criteria and reaching out on a clock is drawn from current runbook-writing guidance (Raccoon Page, *How to write a runbook your on-call will actually use*, 2026-05; On Call Journal, *Runbook Template for Production Support Teams*, 2026-09; Pulsetic, *Runbooks: How to Write One That Works at 3am*; Webalert, *Incident Runbook Template*, 2026-03; AIOps SRE, *SRE Runbook Template*).
 
 Authoritative anchors:
 
-- **AWS Well-Architected OPS07-BP03 — Use runbooks to perform procedures.** A runbook is a documented process to achieve a specific outcome; it must include guidance on error handling, tools, permissions, exceptions and escalations; it is published centrally and updated as part of change management; automate the short and frequent first.
+- **AWS Well-Architected OPS07-BP03 — Use runbooks to perform procedures.** A runbook is a documented process to achieve a specific outcome; it must include guidance on, in the standard's words, "error handling, tools, permissions, exceptions and escalations"; it is published centrally and updated as part of change management; automate the short and frequent first.
 - **AWS Well-Architected OPS07-BP04 — Use playbooks to investigate issues.** Playbooks establish an unknown root cause; known root causes get runbooks. This is the basis for the branch-out rule.
 - **AWS Well-Architected OPS10-BP02 — Have a process per alert.** An alert without a matching procedure is a noise generator.
 - **AWS Well-Architected OPS02-BP02 — Processes and procedures have identified owners.**

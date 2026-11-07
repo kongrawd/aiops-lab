@@ -95,7 +95,7 @@ Relative and absolute time are the fastest-decaying content in a runbook, and bo
 
 **Replace "wait N minutes" with a condition plus a bound.** A fixed duration is a guess about a system that will get faster or slower. Write the observable the operator is waiting for, and give the timeout as a stopping rule rather than as the expected time:
 
-> Wait until `READY` is `True`. If it is not within 10 minutes, go to **Escalate**.
+> Wait until `READY` is `True`. If it is not within 10 minutes, go to **Reach out**.
 
 The condition is ground truth; the bound exists only so the operator knows when to stop waiting. Where the expected duration genuinely helps — it tells the operator at four minutes that fifteen is wrong — record it as a measured figure in the metadata header rather than inside the step, and only once someone has measured it.
 
@@ -126,7 +126,7 @@ The reason a runbook gets run against the wrong system is almost always that its
 
 A placeholder with no adjacent explanation is a trap: `<YOUR_NAMESPACE>` tells the operator nothing about which namespace is correct or where to look. Every placeholder needs its discovery command, and if the value changes on every deployment, say that explicitly.
 
-**State the preconditions that make the procedure unsafe.** The one thing a runbook cannot supply is judgement about whether the documented fix is safe right now — a restart that is correct on a normal day can be the wrong move during partial data corruption. Name the conditions under which the operator should stop and escalate instead of proceeding. And where a procedure cannot be automated, the reason is often the most important sentence in the document: it tells the operator why they are being asked to think.
+**State the preconditions that make the procedure unsafe.** The one thing a runbook cannot supply is judgement about whether the documented fix is safe right now — a restart that is correct on a normal day can be the wrong move during partial data corruption. Name the conditions under which the operator should stop and reach out instead of proceeding. And where a procedure cannot be automated, the reason is often the most important sentence in the document: it tells the operator why they are being asked to think.
 
 ## Before and after
 
@@ -150,7 +150,7 @@ Each pair below is from a different system on purpose. The failure is never abou
 **Relative time**
 
 > ✗ Wait about 12 minutes for the replacement node to join.
-> ✓ Wait until the node reports ready — `<command>`. If it has not within 30 minutes, go to **Escalate**. Work scheduled before it joins is in the exposure window.
+> ✓ Wait until the node reports ready — `<command>`. If it has not within 30 minutes, go to **Reach out**. Work scheduled before it joins is in the exposure window.
 
 **Time-anchored language**
 
@@ -172,15 +172,46 @@ Each has a durable substitute, and in every case the substitute is the better do
 
 | Instead of | Write |
 |---|---|
-| A case or ticket identifier as the basis | The class of source and what it established — "service-team analysis during a support engagement on `<version>`" |
+| A case or ticket identifier as the basis | The class of source and what it established — "published documentation", or "code analysis of `<file>`:`<symbol>` at `<branch>`" where the behaviour is visible in published code |
 | A named individual who verified it | `verification: replicated` plus which steps were replicated, in the Verification status section |
 | A team as owner | Nothing in the file. Ownership is assigned where the runbook is published |
 | An account, domain, cluster or host | A declared variable with its discovery command — which the durability rules require anyway |
 | A measurement from one incident | The mechanism as an invariant, and the command that sizes it here |
 | An internal dashboard or wiki link | The public product or API documentation for the same thing |
-| An internal tool invocation | The public API equivalent, or an escalation step if none exists |
+| An internal tool invocation | The public API equivalent, or a reach-out step if none exists |
 
 The convergence is not a coincidence. Almost everything that makes a runbook unpublishable is also something that decays: a hostname, a case number, a one-off measurement, a named person. **Writing for durability produces a shareable document, and writing for shareability produces a durable one.** Where the two pull apart it is usually evidence — the reader needs to know how much to trust a step — and that is answered by stating verification status rather than by citing a source they cannot open.
+
+## Scan for identifying content before publishing
+
+The "never in the document" list above is a rule; this is how to enforce it. Run these over the runbook directory and **read every hit** — the scan is not pass/fail, because some classes legitimately match.
+
+```bash
+# 1. Account identifiers, ARNs, addresses, mailboxes
+grep -rnoE "\b[0-9]{12}\b|arn:[a-z-]*:[^ \`)]*|\b([0-9]{1,3}\.){3}[0-9]{1,3}\b|[a-zA-Z0-9._%-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" .
+
+# 2. Case, ticket and change identifiers - adjust the shapes to your tracker
+grep -rnoE "\b1[0-9]{14}\b|\b[A-Z][0-9]{9,10}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b" .
+
+# 3. Internal hosts and tooling - extend with your organisation's own
+grep -rnoiE "<internal-domains>|<internal-tool-names>" .
+
+# 4. Attribution shapes, for manual review
+grep -rhoE "\b(by|from|per|with|confirmed by|told) [A-Z][a-z]{2,}\b" . | sort -u
+
+# 5. Environment-specific names you know appear in the source material
+grep -rnoiE "<customer>|<product>|<cluster>|<index-prefix>" .
+```
+
+**Three of these produce legitimate hits, so judgement is the point:**
+
+- **Public documentation URLs** will match a vendor-domain pattern. A link to published documentation is the opposite of a leak — it is what makes the runbook checkable. Keep it.
+- **Attribution shapes** match ordinary prose and public artefact titles. What you are looking for is a *person* or a *team* credited with a statement, not every capitalised word.
+- **Identifier shapes** match version strings, byte counts and port numbers. Read the line.
+
+**What a hit in class 1, 2 or 5 almost always means:** source material leaked through during drafting. Those are the ones to remove, and the fix is usually the substitution table above rather than deletion — replace the value with the command that produces it.
+
+Run this **before the first commit and again before any later publication**, because the risk is not writing an identifier deliberately; it is pasting a command, a log line or an error string that carries one. A stack trace, a sample response or a reconstructed command with inline credentials are the usual carriers.
 
 ## Durability checklist
 
@@ -199,9 +230,10 @@ Run this alongside the main pre-handover checklist in `runbook-shape.md`.
 - [ ] **Version-dependent behaviour names the version range,** not the moment.
 - [ ] **Applicability is a checkable condition list,** with the discriminator for the near-miss case and a link to where it goes instead.
 - [ ] **Unsafe preconditions are named,** and if the procedure resists automation, the reason is stated.
+- [ ] **The identifying-content scan has been run and every hit read** — see the scan above. Classes 1, 2 and 5 are cleared; public documentation URLs and ordinary prose are kept.
 - [ ] **Nothing identifying anywhere in the file** — no person, team, case or ticket id, internal URL, account, domain, cluster, host, or single-environment measurement.
 - [ ] **Every reference in `metadata.references` is a public URL** the reader can open.
-- [ ] **Every command is runnable by the intended reader** — no internal tooling; vendor-only actions are escalation steps.
+- [ ] **Every command is runnable by the intended reader** — no internal tooling; vendor-only actions are reach-out steps.
 - [ ] **`metadata.verification` is set honestly,** and the Verification status section says what would raise it.
 
 ## Sources

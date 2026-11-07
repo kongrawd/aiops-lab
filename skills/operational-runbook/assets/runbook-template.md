@@ -63,6 +63,14 @@ Keep this section as written. It travels with the document, and the operator who
 | <e.g. engine version in range> | `<command>` | `<range>` |
 | <e.g. configuration this assumes> | `<command>` | `<result>` |
 
+**What differs by version.** <Include wherever behaviour changes across versions. A version range gates the document; it does not explain anything. Tell the operator what actually differs, so someone on a version this runbook does not list can still reason about their own system.>
+
+| Behaviour | Where the change is absent | Where it is present | How to tell which you have |
+|---|---|---|---|
+| <the behaviour that changed> | <what the system does without the change> | <what it does with it> | `<command>` → <field or output to read> |
+
+<State plainly which side of that line this procedure is for, and what the reader on the other side should do instead. Where a fix exists but has not reached every release line, say that the reader must check their own build rather than trusting a version number quoted here.>
+
 **Does not apply when.** <The near-miss condition that sends the operator elsewhere, with the check that distinguishes it and a link to the right runbook. This is where the wrong runbook gets run.>
 
 ## Values to obtain
@@ -99,7 +107,7 @@ Declare every environment-specific value once, then refer to the name throughout
 - [ ] <Blast radius check: what else this touches.>
 - [ ] <Safe-window condition, expressed as the condition and its reason — so the operator can recognise when the reason stops applying.>
 
-**Do not proceed if** <the precondition that makes this procedure unsafe — the state in which the documented fix is the wrong move. Escalate instead.>
+**Do not proceed if** <the precondition that makes this procedure unsafe — the state in which the documented fix is the wrong move. Reach out instead.>
 
 <If `automatable: no`, state the reason here. It tells the operator why they are being asked to think.>
 
@@ -128,7 +136,7 @@ Declare every environment-specific value once, then refer to the name throughout
 **Branch.**
 - `<result A>` → continue to step 3.
 - `<result B>` → <different step, or another runbook by name>.
-- `<result C>` → go to **Escalate**.
+- `<result C>` → go to **Reach out**.
 
 ### Step 3 — <action>
 
@@ -154,7 +162,7 @@ Wait until <observable condition> — confirm with:
 <command>
 ```
 
-If the condition is not met within <bound>, go to **Escalate**. <The condition is what you are waiting for; the bound exists only so the operator knows when to stop.>
+If the condition is not met within <bound>, go to **Reach out**. <The condition is what you are waiting for; the bound exists only so the operator knows when to stop.>
 
 ## Validation
 
@@ -177,9 +185,9 @@ Each item is an observation with a command, not a judgement.
 
 ## If this does not work
 
-**Escalate when:** <condition, with a bound — "the condition in step 4 is not met within its bound", or "any step returns X">
+**Reach out when:** <condition, with a bound — "the condition in step 4 is not met within its bound", or "any step returns X">
 
-**Escalate to:** <route, and how>
+**Reach out to:** <route, and how>
 
 **Attach:** <the evidence to hand over — outputs already collected, the measurements taken in Impact, what was already attempted. This is what stops the next responder starting over.>
 
@@ -194,7 +202,7 @@ Refer to siblings by their name, which resolves to a directory and is greppable.
 
 Every step in this document traces to a replication or to a reputable source. That is the condition for the runbook existing - a step resting on inference is reason to leave the procedure unwritten rather than to label it.
 
-**Basis.** <What class of source each part came from and what it established - "vendor documentation", "vendor engineering analysis of this behaviour on <version>", "upstream change record", "observed in a controlled test". Describe the source; do not identify it.>
+**Basis.** <What class of source each part came from and what it established - "published documentation", "code analysis of <file>:<symbol> at <branch or tag>", "upstream change record", "observed in a controlled test". Name files and symbols for code analysis so the reader can re-read them; describe other sources by class and do not identify them.>
 
 **Replicated.** <Which steps have been run with the output observed, and against what version. Name the rest as documented, because an operator deciding how far to trust a step is entitled to know which of the two they are holding.>
 
