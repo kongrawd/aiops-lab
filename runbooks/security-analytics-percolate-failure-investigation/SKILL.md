@@ -78,7 +78,9 @@ metadata:
 
 | Behaviour | Where the correction is absent | Where it is present | How to tell which you have |
 |---|---|---|---|
-| Detail in a failed detector's error record | The record carries a generic failure — a percolate search failed, all shards failed — while the real cause exists only in server-side logs. An error-handling step in the alerting layer replaces the detailed cause with a shortened message before it is stored | The error names the cause, for example a query exceeding the clause limit, so you can act without escalating | Read the error record for a failed detector and see whether it names a cause |
+| Detail in a failed detector's error record | The record carries a generic failure — a percolate search failed, all shards failed — while the real cause exists only in server-side logs. An error-handling step in the alerting layer replaces the detailed cause with a shortened message before it is stored | The error names the cause, for example a query exceeding the clause limit, so you can act without reaching out | Read the error record for a failed detector and see whether it names a cause |
+
+**Where to look first when judging breadth.** Three sources agree that a wildcard at the *start* of a rule string is the primary target: published documentation, because matching a leading wildcard requires examining every term in the index; a configuration review that named a specific rule and gave "narrow the leading wildcard" as its remedy; and operator guidance from an engineering analysis that put it as **avoid wildcard patterns at the start of detection rule strings**, calling that the main cost driver. One caveat: a separate analysis in the same record described the trigger only as "wildcard patterns" without qualifying position — so a leading wildcard is where to look first, not the only thing that can make a rule too broad.
 
 **Read your own error record rather than a version number.** This correction shipped as a managed-service patch rather than an upstream change, so there is no public issue to match a version against. Step 2 branches on what the record actually says.
 
@@ -87,7 +89,7 @@ metadata:
 - **The detector is producing findings normally but slowly, or driving load without failing.** That is the per-document cost problem, not a rejection — use `security-analytics-rule-cost-audit`.
 - **Findings stopped for the whole detector and it reports disabled.** Use `security-analytics-detector-disable-verification`.
 - **Findings arrive for some rules and never for others, with no error.** That is silent truncation, not rejection — use `security-analytics-rule-coverage-audit`.
-- **The detector's data source is an alias with no write index.** Nothing is being read at all. Use `security-analytics-alias-write-index-recovery`.
+- **The detector's data source is an alias with no explicit write index.** Nothing is being read at all. Use `security-analytics-alias-write-index-recovery`.
 
 ## Values to obtain
 
@@ -120,7 +122,7 @@ The oldest error-state alert bounds the start of the gap. The newest finding's `
 
 **Recoverability.** Nothing is recoverable. A doc-level monitor advances through documents as they arrive rather than re-scanning a past window, so documents that passed through while the search was failing are not examined after a fix.
 
-**Severity.** Urgent whenever confirmed. The detector reports healthy configuration, every rule still lists as enabled, and the only outward sign is an absence — so nothing else will escalate this for you.
+**Severity.** Urgent whenever confirmed. The detector reports healthy configuration, every rule still lists as enabled, and the only outward sign is an absence — so nothing else will raise this for you.
 
 ## Before you start
 
@@ -181,30 +183,59 @@ Then measure, per detector:
 
 **Expect:** three figures per detector. There is no published threshold for any of them except the query-string length, so report them beside that one documented limit and against the detector's own history, not against a number from this document.
 
+> ⚠️ **A single rule can breach the clause limit on its own.** Do not treat this as an aggregate problem only. A configuration review has identified one rule, on one detector, expanding past the 1,024-clause default by itself — with the remedy given as **narrowing its leading wildcard** rather than reducing the rule set. So scan item 3 rule by rule and record the broadest individual pattern, not just the count.
+
 **Branch.**
 
 - **Total query length at or near 32000** → this is a measurable, documented breach. It is the finding. Continue to step 4.
 - **A high rule count with many broad patterns, and the step 2 cause named the clause limit** → the aggregate query is the suspect. Continue to step 4.
+- **A low rule count but one conspicuously broad pattern** → a single rule is the suspect. Continue to step 4 with that rule; narrowing its wildcard is the remedy to propose.
 - **Low counts, short queries, and step 2 named the clause limit anyway** → the cause is not something this procedure can localise. Go to **Reach out** with the step 2 evidence and these three figures.
 
 > ⚠️ **Do not try to predict the breach by validating a rule against the data index.** It answers a different question. In the percolate path the stored rule query is converted with an index reader of `null` and executed against an in-memory index holding **one document**, so its term expansion has nothing to do with the data index's term dictionary. Validating against the data index over-estimates expansion by a wide margin and will flag rules that never breach. Where the expansion that breaches the limit actually resolves is not established — see `references/mechanism.md`.
 
-### Step 4 — Record what has to change, and stop
+### Step 4 — Establish whether each offending rule is yours to change
 
-This runbook identifies; it does not edit rules, because which rule to narrow and how is a detection-coverage decision rather than an operational one.
+This decides who can act, and the runbook stops here either way: which rule to narrow and how is a detection-coverage decision rather than an operational one.
 
-Record, per offending rule: its identifier, its `queries[].value`, whether it validated, and whether it is a rule you authored or one that shipped with the product. The documented remedy for a clause breach is to **simplify the rule or split the detector's rules across more detectors** — raising the limit is a stopgap and is documented as discouraged.
+```
+POST /_plugins/_security_analytics/rules/_search?pre_packaged=false
+{"from":0,"size":100,"query":{"nested":{"path":"rule",
+  "query":{"bool":{"must":[{"match":{"rule.category":"${LOG_TYPE}"}}]}}}}}
+```
 
-Note that a field named in step 2's second branch can be a **typo in a shipped rule** rather than a gap in your mapping; published rule sets have carried misspelled field names. Compare the spelling against the source index mapping before changing your template.
+**Expect:** the custom rules only. An offending rule that appears here is one you authored and can edit. One that does not appear here is pre-packaged — confirm with the same call using `?pre_packaged=true`.
+
+**Branch.**
+
+- **The offending rule is custom** → you can act. Two remedies, and which applies depends on step 3. Where one rule breaches alone, **narrow its wildcard** so it expands less — making a leading wildcard less broad, or anchoring it. Where the aggregate is the problem, **split the detector's rules across more detectors**. Raising the limit is a stopgap and is documented as discouraged.
+- **The offending rule is pre-packaged** → you cannot edit it. Reducing the detector's rule count, or moving that log type's rules across more detectors, is the available action. Go to **Reach out** if neither is acceptable.
+
+> ⚠️ **A field named in step 2's second branch can be a typo in a shipped rule, not a gap in your mapping.** Published rule sets have carried misspelled field names. Compare the spelling against the source index mapping before changing your template — otherwise you add a mapping for a field that was never meant to exist.
 
 ## Validation
 
 This procedure produces a finding, so validation confirms the finding is sound.
 
-1. **The failure is current, not historical.** Re-run step 1 and confirm error-state alerts are still arriving. An old alert with a recovered detector is a different situation.
-2. **The figures are per detector, not per log type.** Several detectors can share a log type, so confirm the rule set you measured belongs to the failing detector.
-3. **Pagination was complete.** Compare requested `size` against returned hits on every rule-search page; a page at the requested size means more remain.
-4. **A low set of figures was not mistaken for a clean result.** Low counts with the clause limit named in step 2 is a real finding — that the cause is not localised here — and belongs in the escalation, not in a conclusion that nothing is wrong.
+1. **The failure is current, not historical.**
+   ```
+   GET /_plugins/_security_analytics/alerts?detector_id=${DETECTOR_ID}&alertState=ERROR&size=20
+   ```
+   **Expect:** error-state alerts with a `start_time` inside the window you are investigating. Only older ones means the detector has recovered and this is a different situation.
+2. **The rule set you measured belongs to the failing detector.** Several detectors can share a log type, so a figure taken per log type is not a figure for this detector.
+   ```
+   GET /_plugins/_security_analytics/detectors/${DETECTOR_ID}
+   ```
+   **Expect:** the rule identifiers under `inputs[0].detector_input.custom_rules` and `pre_packaged_rules` match the rules you measured in step 3.
+3. **Pagination was complete.**
+   ```
+   POST /_plugins/_security_analytics/rules/_search?pre_packaged=true
+   {"from":0,"size":1,"query":{"nested":{"path":"rule",
+     "query":{"bool":{"must":[{"match":{"rule.category":"${LOG_TYPE}"}}]}}}}}
+   ```
+   **Expect:** a `hits.total` you can compare against the number of rules you actually paged through. A count you never reached means the measurement is partial.
+
+> ⚠️ **A low set of figures is a finding, not a clean result.** Low counts with the clause limit named in step 2 means the cause is not localised here — that belongs in what you hand over, not in a conclusion that nothing is wrong.
 
 **Exit criteria.** You can state: the detector is failing, what the error record said, what the log said if the record was generic, the detector's rule count, total compiled query length against the documented limit, and how many rules carry broad patterns. Anything less supports reaching out but not a rule change.
 

@@ -137,6 +137,14 @@ GET /${QUERY_INDEX}/_stats/search
 
 Sample `query_total` and `query_time_in_millis` twice and take the difference.
 
+**Cost scales with fan-out frequency, not with data volume.** This is the most useful thing to know before changing anything, and it is arithmetic rather than a measurement. On every scheduled tick the coordinating node dispatches a fan-out request to each data node holding shards of the detector's source indexes, and the per-request work happens once per request regardless of how many documents matched. So:
+
+```
+expensive operations per hour  ≈  (concrete target indexes on the node)  ×  (3600 / schedule interval in seconds)
+```
+
+Both terms are readable from the detector and the cluster, so you can compute the figure for your own system rather than inheriting one. It also tells you which levers exist: the schedule interval, and the number of concrete indexes a detector's data source resolves to.
+
 **Blast radius.** Cost lands on the search path of every data node holding shards of the detector's source indexes, because evaluation fans out per shard. Documented consequences of the pressure are increased search latency and queue rejections, which affect user-facing search on the same cluster — not only detection.
 
 **Recoverability.** Fully recoverable. Nothing here is a data-loss path; the cost is ongoing rather than accumulated, so reducing rule breadth or volume takes effect immediately.
@@ -178,7 +186,7 @@ GET /_cat/indices/<the ${QUERY_INDEX} name pattern>?v&h=index,docs.count,store.s
 **Branch.**
 
 - **Degradation built up over weeks and a node restart relieves it** → the per-node accumulation defect. Check the alerting plugin version against the fix in `metadata.references`; it is merged and backported across many lines. **Stop here** and plan the upgrade.
-- **A large and growing number of query indexes** → the sprawl problem. The cleanup change was unmerged at the time of writing, so treat this as an escalation rather than something you resolve here, and report the count.
+- **A large and growing number of query indexes** → the sprawl problem. The cleanup change was unmerged at the time of writing, so treat this as something to reach out about rather than resolve here, and report the count.
 - **Neither** → continue to step 3.
 
 ### Step 3 — Confirm you can read the query index
@@ -231,6 +239,10 @@ Repeat with `?pre_packaged=false` for custom rules, and page with `from` and `si
 
 Scan `queries[].value` for a `*` immediately following a `:` or a `\`, and for `/…/` regular-expression delimiters. There is **no documented server-side filter** for this — no parameter selects rules by query content or by rule id — so the scan is client-side on the paged results.
 
+> ⚠️ **Scan the compiled query, not the rule as written.** A rule can contain no wildcard character at all and still compile to a leading wildcard, because modifiers produce them — an `endswith` modifier compiles to `(<FIELD>: *term)`. `queries[].value` is the compiled form, which is why this step reads it. Reading the YAML instead would miss the common case.
+>
+> `references/rule-patterns.md` has the construct-by-construct table, the two negation traps that are correctness rather than cost, the field typing that produces zero findings silently, and the organisation trade-offs. Read it before recommending any rule change.
+
 ### Step 6 — Measure what the cost actually is
 
 ```
@@ -247,16 +259,45 @@ The comparison that would attribute it — the same two samples with the detecto
 
 This procedure produces a judgement, so validation confirms the judgement is sound.
 
-1. **The zero was validated.** If step 4 returned zero, confirm step 3 showed a consistent non-zero total. An unvalidated zero is not a result.
-2. **Pagination was complete.** Compare requested `size` against returned hits for every rule-search page. A page at the requested size means more remain.
-3. **The cost figure is labelled for what it is.** Either an attributing comparison exists from a window where the detector was already off, or the figure is reported as cost observed on the query index rather than as this detector's cost. Do not disable a detector to obtain it inside this procedure.
-4. **The two competing causes were excluded,** with the plugin version and the query-index count recorded, not merely assumed.
+1. **A zero from step 4 was validated, not assumed.** An unvalidated zero is the most dangerous output here, because it reads as a clean bill of health.
+   ```
+   GET /_cat/indices/${QUERY_INDEX}?expand_wildcards=all&v&h=index,docs.count
+   GET /${QUERY_INDEX}/_count
+   ```
+   **Expect:** a non-zero `docs.count` and a matching non-zero unfiltered `count`. A non-zero `docs.count` beside a zero-hit search means the read was scrubbed and step 4's figure means nothing.
+2. **Pagination was complete.**
+   ```
+   POST /_plugins/_security_analytics/rules/_search?pre_packaged=true
+   {"from":0,"size":1,"query":{"nested":{"path":"rule",
+     "query":{"bool":{"must":[{"match":{"rule.category":"${LOG_TYPE}"}}]}}}}}
+   ```
+   **Expect:** a `hits.total` you can compare against the number of rules you actually paged through in step 5. A total you never reached means the scan is partial.
+3. **The two competing causes were excluded by reading, not by assumption.**
+   ```
+   GET /_cat/plugins?v&h=name,component,version
+   GET /_cat/indices/<the ${QUERY_INDEX} name pattern>?v&h=index,docs.count
+   ```
+   **Expect:** the `opensearch-alerting` version recorded, and a query-index count recorded. Both belong in what you hand over.
+4. **The levers were read, not guessed.**
+   ```
+   GET /_plugins/_security_analytics/detectors/${DETECTOR_ID}
+   ```
+   **Expect:** `schedule.period.interval` and `unit`, and the data source under `inputs[0].detector_input.indices`. Those are the two terms in the cost relationship, so a recommendation to lengthen the schedule should quote the current value.
+
+> ⚠️ **Label the cost figure for what it is.** Either an attributing comparison exists from a window in which the detector was already off, or the figure is reported as cost observed on the query index rather than as this detector's cost. Do not disable a detector to obtain it inside this procedure — that is a write, and it belongs to a change window.
 
 **Exit criteria.** You can state: the extraction-failed count against the total, which rules account for it, the measured search rate and latency on the query index with the attribution comparison, the alerting plugin version, and the query-index count. Anything short of that supports an impression but not a change to a rule set.
 
 ## If this does not work
 
 **Reach out when:** step 3 shows you cannot read the query index; or the query-index count is high and growing, since the cleanup change is unmerged; or evaluation is falling behind schedule after the two version-dependent causes are excluded.
+
+**Four levers, in the order an engineering analysis recommended them.** None requires editing a rule, and the first is usually the largest:
+
+1. **Lengthen the detector's schedule.** The per-hour cost is inversely proportional to the interval, so moving a detector from one minute to five cuts its expensive operations by about four fifths — with no change to detection logic, only added latency before a match surfaces. Read the current value from `schedule.period` on the detector.
+2. **Disable detectors that are not needed** — and **verify the disable took effect**, because a detector can report disabled while its workflow keeps running. Use `security-analytics-detector-disable-verification`.
+3. **Avoid wildcard patterns at the start of rule strings**, which is named as the main cost driver. This is the only lever that needs a rule change, and it is a detection-coverage decision.
+4. **Do not resize the cluster for this.** The cost does not scale with hardware, so a larger instance delays recurrence rather than removing it. This is worth stating explicitly to whoever is asking for more nodes.
 
 **Reach out to:** your OpenSearch support channel, through the route your organisation uses for a production cluster.
 
@@ -272,6 +313,8 @@ Siblings are referred to by name, which resolves to a directory and is greppable
 - `security-analytics-rule-coverage-audit` — where the concern is rules not producing findings rather than rules costing too much. The two have opposite symptoms and a shared enumeration.
 - `security-analytics-percolate-failure-investigation` — where the detector is failing rather than slow, because a rule expands past the clause limit. Same rule material, opposite symptom.
 - `security-analytics-detector-disable-verification` — where a detector was disabled to shed this load and you need to confirm it actually stopped.
+
+**Reference files.** `references/evidence.md` — what this runbook rests on and what it does not. `references/rule-patterns.md` — what each Sigma construct compiles to, the silent-failure modes, the anti-patterns, and the organisation trade-offs.
 
 ## Verification status
 
