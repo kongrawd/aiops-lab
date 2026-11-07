@@ -9,6 +9,9 @@
 # Agent tooling
 .claude/
 
+# Outbound contribution tracking - local only, not published
+contrib/
+
 # Python
 __pycache__/
 *.py[cod]
