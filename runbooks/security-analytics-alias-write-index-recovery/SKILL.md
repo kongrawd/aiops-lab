@@ -133,7 +133,7 @@ GET /_cat/indices/<pattern>?v&h=index,creation.date.string&s=creation.date
 - [ ] Confirmation of which index your shipper is currently writing to, so the designation lands on the index actually receiving data
 - [ ] Awareness of any index lifecycle policy managing this alias — if a policy performs rollover against it, coordinate, because the policy will also change the designation
 
-**Do not proceed if** you cannot establish which member should receive writes. Designating the wrong index sends ingestion to an index your pipeline is not expecting, which is a worse state than the one you are fixing. Determine it first, or escalate.
+**Do not proceed if** you cannot establish which member should receive writes. Designating the wrong index sends ingestion to an index your pipeline is not expecting, which is a worse state than the one you are fixing. Determine it first, or reach out.
 
 ## Procedure
 
