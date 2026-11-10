@@ -33,6 +33,15 @@ Every step in `SKILL.md` traces to a replication, an engagement observation, or 
 - A plugin-internal index returning zero hits for a caller without access while holding documents.
 - Detectors with triggers and no rules breaking the overview page for every detector.
 
+**Cut after an adversarial validation pass.** Steps 6 and 7 originally carried seven flags. Four checks were removed or downgraded because they were not decidable from the reads the sweep performs. Recorded so they are not re-proposed:
+
+- **A `_field_caps` call with `fields=*` to detect rule fields absent from an index.** This **cannot fail.** The wildcard expands over fields that exist, so a field absent from the index is absent from the response and therefore absent from `unmapped` too, and the clean branch fires regardless of the true state. Detecting a named field's absence requires enumerating the names in the request, which this sweep has no step to produce. Step 7 now compares the template's declared alias entries against the index's, which is decidable from two reads.
+- **A per-detector coverage ratio.** Mapping an absent field name back to the rules that reference it needs the rule set, which this sweep does not read. The ratio was uncomputable, and an exit criterion depended on it.
+- **"The component template carries fewer alias entries than the detector has mapped rule fields" as a flag signature.** The comparator is produced by no step, and the comparison does not discriminate even with both numbers — an alias legitimately absent because its target base field is absent renders identically to one dropped by a replacing save. Retained as an observation.
+- **"The two aliases' indices come from different templates" as a flag condition.** Nothing records which template created an index, and the mechanism itself appends `<alias>*` to the wrong template, polluting the name-matching that would be used to infer it. The prefix case is retained as an observation for step 7 to settle from the index.
+
+Corrected in the same pass: the frontmatter understated its own version scope; a blanket prohibition on `POST` that the procedure violated twice, now scoped to the mappings route; a stale flag count in validation; a step heading claiming four reads above three commands; the rule-array list omitting the documented `inputs[0].detector_input.rules[]` shape; a validation item asserting the two enumeration counts should match, which this file records as unestablished; and an applies-when row reading an alerting stats route no step consumed. The post-upgrade warning is now scoped to the case the guard covers — a plugin-owned template belonging to another alias — because a save resolving to an operator-created template is accepted with no such check.
+
 **Not established.**
 
 - **Whether this flag list is complete.** It is the union of the states the shipped sibling runbooks establish, which is a record of what has been found, not a proof that nothing else is silent. A detector can fail in a way nobody has yet characterised, and this sweep would report it clean. Treat a clean result as "none of the known silent states", not as "healthy".

@@ -17,10 +17,10 @@ metadata:
     - PREVENTION
   skill_type: USER
   service: OpenSearch Security Analytics / Alerting
-  applies_to_versions: All lines. One flag - the rule-count bound - is version-dependent; see "What differs by version". The others are configuration states and are not.
+  applies_to_versions: All lines. Two behaviours are version-dependent - the rule-count bound, and how a field-mappings save picks the index template; see "What differs by version". The remaining flags are configuration states that no version alters.
   risk_level: low
   read_only: true
-  automatable: yes
+  automatable: partial
   verification: documented
   last_verified: 2026-11-10
   last_edited: 2026-11-10
@@ -51,9 +51,6 @@ metadata:
       kind: product-doc
     - title: Field capabilities API — the include_unmapped parameter
       url: https://docs.opensearch.org/latest/api-reference/search-apis/field-caps/
-      kind: api-reference
-    - title: Component template API
-      url: https://docs.opensearch.org/latest/im-plugin/index-templates/#composable-index-templates
       kind: api-reference
     - title: Index template for an index-alias mappings save is resolved by alias name before backing index
       url: https://github.com/opensearch-project/security-analytics/pull/1835
@@ -93,7 +90,6 @@ metadata:
 |---|---|---|
 | Security Analytics detectors exist | `POST /_plugins/_security_analytics/detectors/_search` | At least one hit |
 | You can read the plugin configuration index | Step 2 | Non-zero `docs.count` |
-| You can read the Alerting workflow route | `GET /_plugins/_alerting/stats` | `200` |
 
 **What differs by version.** Two flags are version-dependent. The rest are configuration states that no version alters.
 
@@ -104,7 +100,7 @@ metadata:
 
 **Both step 6 flags that concern template attachment are about the first behaviour** — so on a build carrying the change, no *new* misattachment occurs for an alias. Run them anyway, for two reasons given with the change itself: existing misattachments are not repaired by upgrading, and the pattern append is suppressed only for aliases, so a data-stream input still widens the matched template's patterns.
 
-> ⚠️ **On a build carrying the change, an unrepaired misattachment turns into a failing save.** The new guard fires on existing state, so the next field-mappings call for the affected alias — including a detector edit from Dashboards — fails rather than succeeding quietly, until the attachment is corrected by hand. Read step 6 **before** an upgrade if you can, and see `opensearch-blue-green-upgrade-assessment`.
+> ⚠️ **On a build carrying the change, one kind of unrepaired misattachment turns into a failing save.** The new guard fires on existing state, but **only where the matched template is plugin-owned and belongs to a different alias** — a save that resolves to an operator-created template is still accepted with no such check. In the case the guard does cover, the next field-mappings call for the affected alias, including a detector edit from Dashboards, fails until the attachment is corrected by hand; the change's review thread records this as intended. Read step 6 **before** an upgrade if you can, and see `opensearch-blue-green-upgrade-assessment`.
 
 **Read your own build rather than trusting a version written here.** Where the rule-count flag fires, `security-analytics-rule-coverage-audit` carries the behavioural check that settles it for your build; this sweep only tells you which detectors are worth that check.
 
@@ -154,7 +150,7 @@ Record the total from `hits.total`, then the flagged count from step 3's table. 
 
 > ⚠️ **Do not use the detector `_execute` route anywhere in this sweep.** It executes rather than inspects, which would make this procedure something other than read-only, and the public report states it runs the same code path as a scheduled evaluation and carries the same page-bound limitation — so it cannot verify the thing you would be invoking it to verify.
 
-> ⚠️ **`GET /_plugins/_security_analytics/mappings?index_name=…` is a read. `POST` to the same route is not.** The POST form applies field mappings and rewrites the alias component template from whichever index it resolves, which destroys the state steps 6 and 7 measure. The Dashboards **Edit field mappings** page calls the POST form when it opens. So do not open that page, and do not use POST anywhere in this sweep — the two differ by verb alone, and one of them is the thing you are auditing.
+> ⚠️ **On the mappings route specifically, `GET` reads and `POST` writes.** `GET /_plugins/_security_analytics/mappings?index_name=…` is a read; `POST` to the same path applies field mappings and rewrites the alias component template from whichever index it resolves, destroying the state steps 6 and 7 measure. **Use the `GET` form only on that route.** This is not a blanket rule about the verb — the detector search this sweep relies on is itself a `POST` and is a read. Check the operation, not the method. The Dashboards *Edit field mappings* page has been reported to issue the `POST` form when it opens, so treat opening it as a change rather than an inspection.
 
 > ⚠️ **A second alias used by a test or secondary detector needs its own write index.** Guidance circulated to the contrary — that a secondary alias should be left without one because the data is written through the primary — and it was withdrawn after testing: a detector resolves *its own* alias, and where that alias has no write index the resolution yields nothing and the detector scans no part of any new index. Treat every alias that any detector reads as in scope for step 5, not only the primary one.
 
@@ -178,7 +174,7 @@ Sum the rule arrays per detector. **Sum all of these key shapes** — the publis
 - `inputs[0].detector_input.custom_rules[]`
 - `inputs[0].detector_input.pre_packaged_rules[]`
 - `inputs[0].input.custom_rules[]` and `inputs[0].input.pre_packaged_rules[]`
-- `inputs[0].rules[]`
+- `inputs[0].detector_input.rules[]` — the documented response shape
 
 **If `hits.total` is zero:** there are no detectors to audit. Confirm that is expected before concluding anything — a backend-role filter can produce this result for a caller who simply cannot see them. **Stop here.**
 
@@ -283,7 +279,7 @@ GET ${ALIAS}/_mapping
 
 ### Step 6 — Sweep the field-alias plumbing, fleet-wide
 
-Four reads, once each for the whole cluster rather than once per detector. They establish whether the templates that carry field aliases onto each new index are wired correctly.
+Three reads, once each for the whole cluster rather than once per detector.
 
 ```
 GET /_cat/aliases?v&h=alias,index,is_write_index
@@ -291,56 +287,47 @@ GET /_component_template/*alias-mappings*
 GET /_index_template
 ```
 
-**Expect:** from the first, one row per alias-to-index pair across the cluster. From the second, one component template per alias that any detector reads, each carrying `template.mappings.properties` entries — base fields alongside `"type": "alias"` entries with a `path`. From the third, every index template with its `index_patterns`, `composed_of` and `priority`.
+**Expect:** from the first, one row per alias-to-index pair. From the second, the plugin's alias component templates, each carrying `template.mappings.properties` entries including `"type": "alias"` entries with a `path`. From the third, every index template with its `index_patterns`, `composed_of` and `priority`.
 
-> ⚠️ **Prove this read before interpreting it.** A component template listing no alias entries and a caller who cannot read component templates look identical. Confirm at least one detector's component template comes back carrying alias entries before treating any *other* detector's empty one as a finding. With no such positive control, record every flag in this step as **not evaluated**.
+> ⚠️ **Prove the component-template read before interpreting it.** A component template listing no alias entries and a caller who cannot read component templates look identical. Confirm at least one comes back carrying alias entries before treating an empty one as a finding. Without that positive control, record this step as **not evaluated**.
 
-**Flag each alias against this table.**
+> ⚠️ **An absent component template is not a finding on its own.** The plugin skips the template path entirely when a detector's input is already a concrete index, and a detector whose field mappings were never saved has no component template either. Establish that the detector reads an alias and has had mappings saved before reading absence as a fault.
 
-| Flag | Signature | Where to go |
+**Resolve `${SOURCE_TEMPLATE}` from a member index name, never from the alias name.** The two can differ, and where they differ the template you would otherwise assess is not the one creating the indices. That single instruction is what this step exists to make you do.
+
+**One flag, and two observations.** Only the first of these is cleanly decidable from the three reads above.
+
+| | Signature | Where to go |
 |---|---|---|
-| **Empty or shrunken alias component template** | the component template for an alias carries fewer `"type": "alias"` entries than that alias's detectors have mapped rule fields — in the limit, none at all | `security-analytics-field-alias-template-recovery` |
-| **Component template on the wrong index template** | the template listing the alias component in its `composed_of` is **not** `${SOURCE_TEMPLATE}` — its `index_patterns` do not match the alias's member indices, or match no index in the cluster | `security-analytics-field-alias-template-recovery` |
-| **Alias-name prefix collision** | one alias name is a leading substring of another, an `index_patterns` entry of the form `<shorter-alias>*` appears on a template, **and** the two aliases' member indices are created by different index templates | `security-analytics-field-alias-template-recovery` |
-| **Alias spans more than one log source** | the alias's member indices do not all come from `${SOURCE_TEMPLATE}` — check each member's name against that template's `index_patterns` | Operator action — see below |
+| **Flag — component template absent from `${SOURCE_TEMPLATE}`** | `${SOURCE_TEMPLATE}`'s `composed_of` does not list the alias's component template, while some *other* template does | `security-analytics-field-alias-template-recovery` |
+| *Observation* — component template empty | it carries no `"type": "alias"` entries at all | Step 7 decides whether it matters |
+| *Observation* — alias names share a prefix | one alias name is a leading substring of another, and an `index_patterns` entry of the form `<shorter-alias>*` appears on a template | Step 7, then `security-analytics-field-alias-template-recovery` if a gap is confirmed |
 
-**Why the second and third flags happen, and why a name check is not enough.** On a build without the change in **What differs by version**, the save resolves the template by matching the *alias name* first, falling back to the concrete index only if that returns nothing, and then appends `<alias>*` to whichever template it matched. Both consequences follow from those two steps together:
+**Why the prefix case is an observation rather than a flag.** It only costs detection where the two aliases' indices come from different templates — and the reads here cannot settle that, because nothing records which template created an index, and the mechanism itself appends `<alias>*` to the wrong template, polluting the name-matching you would use to infer it. Record the prefix pair and let step 7 decide from the index itself.
 
-- **Prefix collision.** A save on one alias leaves `<alias>*` on its template. A later save on a *longer* alias name whose leading characters match that pattern then resolves to the first alias's template, and the component is attached there.
-- **Renamed member indices.** The template matched by the alias name is no longer the template that creates the current indices, so the component goes to the stale one.
+**A short component template is likewise not decidable here.** An alias legitimately absent because its target base field is absent renders identically to one dropped by a replacing save. Step 7 separates them; this step records the count.
 
-**The prefix collision only costs detection where the two aliases draw their indices from different templates** — which is why the flag carries that third condition. Where both aliases point at the same indices created by the same template, the component lands on a template that still applies to those indices, so the aliases are applied anyway and nothing is lost. A pair of aliases in exactly that shape, one name a prefix of the other, has been observed running without detection loss. **Do not read that as the mechanism being absent**: it means the misattachment was harmless in that topology, and it becomes harmful the moment either alias is repointed at indices of its own.
+### Step 7 — For each flagged or observed alias, read what is on the index
 
-In both cases new indices are created from `${SOURCE_TEMPLATE}`, which never received the component, and so carry none of the field aliases. **Resolve `${SOURCE_TEMPLATE}` from a member index name, never from the alias name** — that is the whole point of the check, and it is what the upstream change does.
-
-**The durable remedy does not depend on any of this.** Declare a field alias for every field name your rules use in your **own** index template. The plugin applies the composed component templates first and the index template's own `template` block last, so your aliases win and a new index never depends on which template the component landed on, or on what the component contains. That is the documented recommendation, and it is the one repair that survives a save, a rollover and an upgrade.
-
-> ⚠️ **The component template is replaced on every save, and that has no fix on any line.** Each field-mappings save overwrites it with only the aliases resolved from one index — the write index, or the newest backing index — rather than merging with what was there. So a save made while that index is missing fields, or a save carrying an empty mapping set, shrinks or empties it, and every index created afterwards is short those aliases. A change to merge instead of replace was proposed publicly and withdrawn without being merged. This is the mechanism behind the first flag, and the reason the remedy above is worth the effort.
-
-**On the precedence question, which the documentation settles.** Component templates in `composed_of` are applied in the order listed, later entries winning on conflict, and the index template's own `template` block is applied last and wins over all of them. Where two *index* templates match one name the highest `priority` wins outright and they are **not** merged, with an absent priority counting as `0`. So a field declared with one type in the index template and another in the composed component template is not a merge conflict — the index template's type is what the index gets. Read it rather than reasoning about it.
-
-**On an alias spanning more than one log source.** The documentation recommends separate detectors per log type, and a detector's field-mapping save resolves rule fields against an index behind its own alias — so a member index from a different log source means saves can be made against the wrong field vocabulary. No sibling runbook owns the repair, which is to correct the alias membership and whatever attaches it; that is a change needing its own approval, so this sweep reports it and stops.
-
-### Step 7 — For each detector flagged in step 3 or 6, read what its rules can actually see
-
-Two reads per flagged detector, against `${INDEX}`.
+One read per member index of the alias.
 
 ```
 GET /_plugins/_security_analytics/mappings?index_name=${INDEX}
-GET ${INDEX}/_field_caps?fields=*&include_unmapped=true
 ```
 
-**Expect:** from the first, the field aliases present on that index, each with its `path`. From the second, one entry per field name you asked about, with unmapped field names returned under `unmapped`.
+**Expect:** the field aliases present on that index, each with a `path` to a base field.
 
-> ⚠️ **`include_unmapped=true` is the parameter that makes this check work.** Without it an absent field is simply missing from the response, which renders identically to a field that is present and fine. Its default is `false`.
+**Compare that set against the `"type": "alias"` entries in `${SOURCE_TEMPLATE}`.** That comparison is the whole of this step, and it is decidable from these two reads alone.
 
 **Branch.**
 
-- **A rule field name comes back under `unmapped`, or has no alias on `${INDEX}`** → that rule is skipped on every evaluation of that index, with no error and no alert. Count the affected rules against the detector's rule-array sum and carry the ratio: it is the share of that detector's coverage that is inert. Go to `security-analytics-detector-mapping-audit`.
-- **Every rule field resolves** → the plumbing is intact for this index. Note that this is a statement about `${INDEX}` only; repeat it per member index of the alias, because the detector resolves one index and assumes the rest match.
-- **Two detectors on one alias map the same rule field to different `path` values** → whichever saved last is the one in force, and the other detector is matching nothing on that field. Go to `security-analytics-field-alias-template-recovery`.
+- **An alias entry in `${SOURCE_TEMPLATE}` is missing from `${INDEX}`** → that index was not created from the template you resolved, or was created before the entry was added. Go to `security-analytics-field-alias-template-recovery`.
+- **`${SOURCE_TEMPLATE}` declares no alias entries, and the index's aliases come only from the component template** → coverage depends on the last save, which is the condition the documented remedy addresses. Go to `security-analytics-field-alias-template-recovery`.
+- **The sets match** → the plumbing is intact for this index. This is a statement about `${INDEX}` only. Repeat per member.
 
-**A ratio of zero on the write index is not a clean result for the detector.** The write index is the one most likely to be correct, because it is the one a recent save resolved. The members that predate the save are where the gap sits.
+> ⚠️ **Which rules a missing alias affects is out of scope here.** Mapping an absent field name back to the rules that reference it needs the rule set, which this sweep does not read — so this step does not produce a coverage ratio, and you should not infer one. `security-analytics-detector-mapping-audit` owns that question.
+
+**A match on the write index is not a clean result for the alias.** The write index is the one most likely to be correct, because a recent save resolved against it. Members that predate the save are where gaps sit.
 
 ## Validation
 
@@ -352,7 +339,7 @@ This procedure produces a judgement about a whole fleet, so validation confirms 
    {"query":{"match_all":{}},"size":100}
    ```
    **Expect:** a hit count strictly below the requested `size`, or a documented paging run that reached the end. A result at the requested size means there is more to read.
-2. **The configuration read was not scrubbed.** This is the check that decides whether two of the five flags mean anything.
+2. **The configuration read was not scrubbed.** This is the check that decides whether the orphaned-workflow and disable flags mean anything.
    ```
    GET /_cat/indices/${CONFIG_INDEX}?v&h=index,docs.count
    ```
@@ -362,14 +349,14 @@ This procedure produces a judgement about a whole fleet, so validation confirms 
    GET /_cluster/settings?include_defaults=true
    ```
    **Expect:** the value of `plugins.security_analytics.filter_by_backend_roles`. Where it is enabled, state in your results that the sweep covered only the detectors your backend role can see.
-4. **The two enumerations agree.** Compare step 1's hit count against step 2's. **Expect:** the same number. A difference is itself a finding and goes in the results rather than being reconciled silently.
+4. **Both enumeration counts are recorded.** Compare step 1's hit count against step 2's and **record both**. No published source states what the relationship between the two sets should be, so a difference is a finding to report rather than a failure to reconcile — it can mean an incomplete read, a stale configuration document, or a detector the API will not return to you, and nothing available distinguishes them.
 5. **The template reads were not blind.** This is the check that decides whether step 6's four flags mean anything.
    ```
    GET /_component_template/*alias-mappings*
    ```
    **Expect:** at least one component template carrying `"type": "alias"` entries. That is the positive control from the step 6 warning. An empty result for every alias means the read cannot see what you are asking about, and every step 6 flag is **not evaluated** rather than clean.
 
-**Exit criteria.** You can state, for every detector the enumeration returned, which flags it carries and which runbook each flag routes to — plus the three figures that bound the sweep: detectors enumerated, detectors flagged, and whether the backend-role filter was limiting what you could see. Where step 6 or 7 ran, add the alias count covered and, per flagged detector, the share of its rule fields that resolve on the index you read. A single flagged detector is not the exit condition; the audit is complete when every detector has a record, including the ones with no flags.
+**Exit criteria.** You can state, for every detector the enumeration returned, which flags it carries and which runbook each flag routes to — plus the three figures that bound the sweep: detectors enumerated, detectors flagged, and whether the backend-role filter was limiting what you could see. Where steps 6 and 7 ran, add the alias count covered, and per alias whether the template's declared alias entries matched the index. A single flagged detector is not the exit condition; the audit is complete when every detector has a record, including the ones with no flags.
 
 ## If this does not work
 
