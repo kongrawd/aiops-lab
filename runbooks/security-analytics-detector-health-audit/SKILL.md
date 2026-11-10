@@ -4,11 +4,13 @@ description: >-
   Sweep every Security Analytics detector for the silent failure states that produce no error and
   no alert, and route each finding to the procedure that repairs it. A detector can be orphaned
   from its workflow, disabled in name only, carrying more rules than an evaluation can return,
-  pointed at an alias with no write index, or pointed at an index that no longer exists - and in
-  every case the console reports it as healthy. Use this first, before investigating any single
-  detector, when a detector is misbehaving and you do not know which one, after any bulk detector
-  change, or as a periodic hygiene pass. This runbook flags and counts; it diagnoses nothing and
-  repairs nothing. Read-only throughout.
+  pointed at an alias with no write index, pointed at an index that no longer exists, sharing an
+  alias with a second detector so each save overwrites the other's field aliases, or reading
+  indices created without the field aliases its rules need - and in every case the console reports
+  it as healthy. Use this first, before investigating any single detector, when a detector is
+  misbehaving and you do not know which one, when field mappings disappear after a rollover, after
+  any bulk detector change, or as a periodic hygiene pass. This runbook flags and counts; it
+  diagnoses nothing and repairs nothing. Read-only throughout.
 metadata:
   agent_types:
     - INCIDENT_TRIAGE
@@ -20,8 +22,8 @@ metadata:
   read_only: true
   automatable: yes
   verification: documented
-  last_verified: 2026-10-15
-  last_edited: 2026-10-15
+  last_verified: 2026-11-10
+  last_edited: 2026-11-10
   references:
     - title: Security Analytics Detector APIs
       url: https://docs.opensearch.org/latest/security-analytics/api-tools/detector-api/
@@ -44,6 +46,27 @@ metadata:
     - title: Detector cannot be updated when its alias has no resolvable write index
       url: https://github.com/opensearch-project/alerting/issues/2271
       kind: upstream-change
+    - title: Index templates — composed_of merge order, template precedence and priority
+      url: https://docs.opensearch.org/latest/im-plugin/index-templates/
+      kind: product-doc
+    - title: Field capabilities API — the include_unmapped parameter
+      url: https://docs.opensearch.org/latest/api-reference/search-apis/field-caps/
+      kind: api-reference
+    - title: Component template API
+      url: https://docs.opensearch.org/latest/im-plugin/index-templates/#composable-index-templates
+      kind: api-reference
+    - title: Index template for an index-alias mappings save is resolved by alias name before backing index
+      url: https://github.com/opensearch-project/security-analytics/pull/1835
+      kind: upstream-change
+    - title: Field-alias component template is replaced rather than merged on each save
+      url: https://github.com/opensearch-project/security-analytics/pull/1834
+      kind: upstream-change
+    - title: Detector creation rewrites a data-stream template's index patterns
+      url: https://github.com/opensearch-project/security-analytics/issues/1102
+      kind: upstream-change
+    - title: Setting up ingestion for a Security Analytics detector — declaring field aliases in your own index template
+      url: https://docs.aws.amazon.com/opensearch-service/latest/developerguide/sa-ingestion-setup.html
+      kind: product-doc
 ---
 
 # Runbook — Find which detectors need attention, across the whole fleet
@@ -72,13 +95,18 @@ metadata:
 | You can read the plugin configuration index | Step 2 | Non-zero `docs.count` |
 | You can read the Alerting workflow route | `GET /_plugins/_alerting/stats` | `200` |
 
-**What differs by version.** One flag in step 4 is only meaningful on a build that lacks the percolate page-size change. The others are configuration states that no version alters.
+**What differs by version.** Two flags are version-dependent. The rest are configuration states that no version alters.
 
 | Behaviour | Where the change is absent | Where it is present | How to tell which you have |
 |---|---|---|---|
 | Rules retrieved per evaluation | At most 10 matching rules; the rest are dropped with no error, warning or log entry | Up to the engine's search ceiling, which the implementation sets to 10,000 | `GET /_cat/plugins?v&h=name,component,version` → read the `opensearch-alerting` row, then check that version against the change linked in `metadata.references` |
+| How a field-mappings save picks the index template to carry the alias component | The **alias name** is matched first and the concrete index only as a fallback, and `<alias>*` is appended to whichever template matched. So a save can attach the component to a template that creates none of the alias's indices, and widen that template's patterns | For an alias input the name is not matched at all — the template is resolved from the write index, or the newest backing index. The pattern append is suppressed, and a save that would attach to another input's plugin-owned template fails instead | `GET /_cat/plugins?v&h=name,component,version` → the `opensearch-security-analytics` row, checked against the change linked in `metadata.references`. The change is on the development line and the 3.10 branch and **has not been backported**, so treat 2.x and 3.x through 3.9 as carrying the first behaviour |
 
-**Read your own build rather than trusting a version written here.** Backports to the older lines were open at the time of writing and that state moves. Where the rule-count flag fires, `security-analytics-rule-coverage-audit` carries the behavioural check that settles it for your build; this sweep only tells you which detectors are worth that check.
+**Both step 6 flags that concern template attachment are about the first behaviour** — so on a build carrying the change, no *new* misattachment occurs for an alias. Run them anyway, for two reasons given with the change itself: existing misattachments are not repaired by upgrading, and the pattern append is suppressed only for aliases, so a data-stream input still widens the matched template's patterns.
+
+> ⚠️ **On a build carrying the change, an unrepaired misattachment turns into a failing save.** The new guard fires on existing state, so the next field-mappings call for the affected alias — including a detector edit from Dashboards — fails rather than succeeding quietly, until the attachment is corrected by hand. Read step 6 **before** an upgrade if you can, and see `opensearch-blue-green-upgrade-assessment`.
+
+**Read your own build rather than trusting a version written here.** Where the rule-count flag fires, `security-analytics-rule-coverage-audit` carries the behavioural check that settles it for your build; this sweep only tells you which detectors are worth that check.
 
 **Does not apply when:**
 
@@ -92,10 +120,15 @@ metadata:
 | `${CONFIG_INDEX}` | The plugin's detector configuration index, which holds the fields the detector API does not return | Discover it rather than assuming the name — it is plugin-internal and can change:<br>`GET /_cat/indices/.opensearch-sap-*?expand_wildcards=all&v&h=index,docs.count`<br>Pick the one holding detector configuration documents; confirm with `GET /${CONFIG_INDEX}/_mapping` that it carries `workflow_ids` |
 | `${DETECTOR_ID}` | A detector flagged by this sweep | `POST /_plugins/_security_analytics/detectors/_search` → `hits.hits[]._id` |
 | `${ALIAS}` | The data source of a flagged detector, where that data source is an alias | Same response → `inputs[0].detector_input.indices[0]` |
+| `${INDEX}` | One concrete member index of `${ALIAS}`. Changes at every rollover, so read it at execution time rather than carrying it between steps | `GET /_cat/aliases/${ALIAS}?v&h=alias,index,is_write_index` → the `index` column |
+| `${SOURCE_TEMPLATE}` | The index template that creates `${ALIAS}`'s member indices — the one whose `index_patterns` match `${INDEX}` | `GET /_index_template` → find the entry whose `index_patterns` match `${INDEX}`. Do not assume it is the template whose patterns match the alias *name*; step 6 exists because those two can differ |
+| `${ALIAS_COMPONENT}` | The plugin-generated component template holding `${ALIAS}`'s field aliases | Discover it rather than assuming the name:<br>`GET /_component_template/*alias-mappings*`<br>then confirm against `${SOURCE_TEMPLATE}`'s `composed_of` list |
 
 ## Impact
 
 **Mechanism.** Every state this sweep looks for is silent by construction. A detector orphaned from its workflow still saves cleanly. A detector whose disable reached only the detector record still reports disabled. A rule set past the evaluation page bound still lists every rule as enabled. An alias with no write index still resolves. In each case the failure is the *absence* of something — a finding, an execution, an evaluated rule — and absence raises no error, writes no log line the console surfaces, and triggers no alert. So the fleet's reported health is not evidence of its actual health, and the only way to know which detectors are affected is to read the states directly.
+
+**The field-alias plumbing fails the same way, one layer down.** A detector's field aliases reach each new index through a template, not through the detector: the plugin writes them into a component template and lists that template in the `composed_of` of an index template, so indices created later carry them. Three properties make this silent. The component template is **replaced**, not merged, each time a detector is created or its field mappings are saved. The template chosen to carry it is found by matching the alias *name*, which is not necessarily the template that creates the alias's indices. And a rule whose field is absent from the index it is evaluated against is skipped rather than failed. So a detector can hold a correct rule set, report healthy, and read indices that carry none of the aliases those rules need — and the break appears not when the configuration changes but at the next rollover after it.
 
 **Size it for this system.** The magnitude is the number of detectors carrying at least one flag, against the total. Both come from step 1 and step 3:
 
@@ -114,11 +147,16 @@ Record the total from `hits.total`, then the flagged count from step 3's table. 
 
 ## Before you start
 
-- [ ] Permission to call the Security Analytics detector, findings and alerts APIs, the Alerting workflow route, and `GET /_cat/*`
+- [ ] Permission to call the Security Analytics detector, findings, alerts and mappings APIs, the Alerting workflow route, and `GET /_cat/*`
 - [ ] Permission to read the plugin configuration index. Without it the sweep cannot see the two fields that matter most, and the failure is silent — see the warning below
+- [ ] Permission to call `GET /_index_template`, `GET /_component_template` and `GET ${INDEX}/_field_caps`. Steps 6 and 7 need all three; without them the field-alias flags cannot be evaluated and belong in your results as *not evaluated* rather than as clean
 - [ ] Awareness that `plugins.security_analytics.filter_by_backend_roles`, where enabled, limits the detectors you can see to those created by users sharing a backend role — so your enumeration may be a subset. Read it with `GET /_cluster/settings?include_defaults=true` and **record the value with your results**, because a sweep over a subset that reports "fleet clean" is worse than no sweep
 
 > ⚠️ **Do not use the detector `_execute` route anywhere in this sweep.** It executes rather than inspects, which would make this procedure something other than read-only, and the public report states it runs the same code path as a scheduled evaluation and carries the same page-bound limitation — so it cannot verify the thing you would be invoking it to verify.
+
+> ⚠️ **`GET /_plugins/_security_analytics/mappings?index_name=…` is a read. `POST` to the same route is not.** The POST form applies field mappings and rewrites the alias component template from whichever index it resolves, which destroys the state steps 6 and 7 measure. The Dashboards **Edit field mappings** page calls the POST form when it opens. So do not open that page, and do not use POST anywhere in this sweep — the two differ by verb alone, and one of them is the thing you are auditing.
+
+> ⚠️ **A second alias used by a test or secondary detector needs its own write index.** Guidance circulated to the contrary — that a secondary alias should be left without one because the data is written through the primary — and it was withdrawn after testing: a detector resolves *its own* alias, and where that alias has no write index the resolution yields nothing and the detector scans no part of any new index. Treat every alias that any detector reads as in scope for step 5, not only the primary one.
 
 > ⚠️ **A zero or an empty result from a plugin-internal index is not evidence of absence.** The published documentation states that for a caller without system-index access the Security plugin can substitute an empty index reader, so a search returns `200 OK` with zero hits even though documents exist, and that an empty result must not be read as proof of access. **Step 2 therefore proves the read works before step 3 interprets anything.** A zero you have not validated is the most dangerous output in this procedure, because across a whole fleet it reads as a clean bill of health.
 
@@ -132,6 +170,8 @@ POST /_plugins/_security_analytics/detectors/_search
 ```
 
 **Expect:** one hit per detector. Record `_id`, `_source.enabled`, the rule arrays, `triggers`, and `inputs[0].detector_input.indices[0]`.
+
+**Then group the detectors by that data source value.** Any data source appearing against more than one detector is a flag in step 3, and it costs no extra call to find. Record the groups — step 7 needs them.
 
 Sum the rule arrays per detector. **Sum all of these key shapes** — the published API documentation uses different shapes across its own examples, and counting only one of them undercounts:
 
@@ -182,6 +222,9 @@ This is the sweep. Work through the table once per detector. **Every row is a fl
 | **Triggers but no rules** | rule-array sum of zero while `triggers` is non-empty | Operator action — see below |
 | **Data source is an alias** | `inputs[0].detector_input.indices[0]` resolves to an alias | Step 5 |
 | **State disagreement** | detector `enabled: false` — continue to step 4 | `security-analytics-detector-disable-verification` |
+| **Shared data source** | one data source value against two or more detectors, from step 1's grouping | Step 7, then `security-analytics-field-alias-template-recovery` |
+
+**On a shared data source.** Detectors reading one alias share a single copy of that alias's field aliases, because the copy is keyed by alias rather than by detector. Saving either detector's field mappings replaces the copy with that detector's set, so which aliases survive depends on which detector was saved last. The detector that did not save it keeps its rule set, reports healthy, and stops matching on the aliases the other one dropped. **This is a flag even when both detectors look correct**, because the state is decided by save order rather than by configuration. The structural fix is one detector per alias, which is a change needing its own approval; step 7 establishes what the current copy actually covers.
 
 **On "triggers but no rules":** the recorded resolution is to delete the detector, because the plugin creates no monitor or workflow for it and it produces no findings or alerts. No sibling runbook owns this, and deletion is a change that needs its own approval — so this sweep reports it and stops. Confirm the detector is genuinely unused before anyone deletes it, and note that this state has been observed to break the shared Security Analytics overview page for *every* detector, not only the one at fault.
 
@@ -238,6 +281,67 @@ GET ${ALIAS}/_mapping
 
 **A correctly designated write index does not close every gap.** Where an index is created by a shipper and attached to the alias afterwards, records written before the attach are never examined, because the detector reads from the attach point rather than from the index's first record. That window is not visible to this sweep at an arbitrary hour — it is only visible during the rollover. Where a detector reads a daily alias, treat that as an open question this sweep does not answer and see `security-analytics-rollover-blind-window-remediation`.
 
+### Step 6 — Sweep the field-alias plumbing, fleet-wide
+
+Four reads, once each for the whole cluster rather than once per detector. They establish whether the templates that carry field aliases onto each new index are wired correctly.
+
+```
+GET /_cat/aliases?v&h=alias,index,is_write_index
+GET /_component_template/*alias-mappings*
+GET /_index_template
+```
+
+**Expect:** from the first, one row per alias-to-index pair across the cluster. From the second, one component template per alias that any detector reads, each carrying `template.mappings.properties` entries — base fields alongside `"type": "alias"` entries with a `path`. From the third, every index template with its `index_patterns`, `composed_of` and `priority`.
+
+> ⚠️ **Prove this read before interpreting it.** A component template listing no alias entries and a caller who cannot read component templates look identical. Confirm at least one detector's component template comes back carrying alias entries before treating any *other* detector's empty one as a finding. With no such positive control, record every flag in this step as **not evaluated**.
+
+**Flag each alias against this table.**
+
+| Flag | Signature | Where to go |
+|---|---|---|
+| **Empty or shrunken alias component template** | the component template for an alias carries fewer `"type": "alias"` entries than that alias's detectors have mapped rule fields — in the limit, none at all | `security-analytics-field-alias-template-recovery` |
+| **Component template on the wrong index template** | the template listing the alias component in its `composed_of` is **not** `${SOURCE_TEMPLATE}` — its `index_patterns` do not match the alias's member indices, or match no index in the cluster | `security-analytics-field-alias-template-recovery` |
+| **Alias-name prefix collision** | one alias name is a leading substring of another, an `index_patterns` entry of the form `<shorter-alias>*` appears on a template, **and** the two aliases' member indices are created by different index templates | `security-analytics-field-alias-template-recovery` |
+| **Alias spans more than one log source** | the alias's member indices do not all come from `${SOURCE_TEMPLATE}` — check each member's name against that template's `index_patterns` | Operator action — see below |
+
+**Why the second and third flags happen, and why a name check is not enough.** On a build without the change in **What differs by version**, the save resolves the template by matching the *alias name* first, falling back to the concrete index only if that returns nothing, and then appends `<alias>*` to whichever template it matched. Both consequences follow from those two steps together:
+
+- **Prefix collision.** A save on one alias leaves `<alias>*` on its template. A later save on a *longer* alias name whose leading characters match that pattern then resolves to the first alias's template, and the component is attached there.
+- **Renamed member indices.** The template matched by the alias name is no longer the template that creates the current indices, so the component goes to the stale one.
+
+**The prefix collision only costs detection where the two aliases draw their indices from different templates** — which is why the flag carries that third condition. Where both aliases point at the same indices created by the same template, the component lands on a template that still applies to those indices, so the aliases are applied anyway and nothing is lost. A pair of aliases in exactly that shape, one name a prefix of the other, has been observed running without detection loss. **Do not read that as the mechanism being absent**: it means the misattachment was harmless in that topology, and it becomes harmful the moment either alias is repointed at indices of its own.
+
+In both cases new indices are created from `${SOURCE_TEMPLATE}`, which never received the component, and so carry none of the field aliases. **Resolve `${SOURCE_TEMPLATE}` from a member index name, never from the alias name** — that is the whole point of the check, and it is what the upstream change does.
+
+**The durable remedy does not depend on any of this.** Declare a field alias for every field name your rules use in your **own** index template. The plugin applies the composed component templates first and the index template's own `template` block last, so your aliases win and a new index never depends on which template the component landed on, or on what the component contains. That is the documented recommendation, and it is the one repair that survives a save, a rollover and an upgrade.
+
+> ⚠️ **The component template is replaced on every save, and that has no fix on any line.** Each field-mappings save overwrites it with only the aliases resolved from one index — the write index, or the newest backing index — rather than merging with what was there. So a save made while that index is missing fields, or a save carrying an empty mapping set, shrinks or empties it, and every index created afterwards is short those aliases. A change to merge instead of replace was proposed publicly and withdrawn without being merged. This is the mechanism behind the first flag, and the reason the remedy above is worth the effort.
+
+**On the precedence question, which the documentation settles.** Component templates in `composed_of` are applied in the order listed, later entries winning on conflict, and the index template's own `template` block is applied last and wins over all of them. Where two *index* templates match one name the highest `priority` wins outright and they are **not** merged, with an absent priority counting as `0`. So a field declared with one type in the index template and another in the composed component template is not a merge conflict — the index template's type is what the index gets. Read it rather than reasoning about it.
+
+**On an alias spanning more than one log source.** The documentation recommends separate detectors per log type, and a detector's field-mapping save resolves rule fields against an index behind its own alias — so a member index from a different log source means saves can be made against the wrong field vocabulary. No sibling runbook owns the repair, which is to correct the alias membership and whatever attaches it; that is a change needing its own approval, so this sweep reports it and stops.
+
+### Step 7 — For each detector flagged in step 3 or 6, read what its rules can actually see
+
+Two reads per flagged detector, against `${INDEX}`.
+
+```
+GET /_plugins/_security_analytics/mappings?index_name=${INDEX}
+GET ${INDEX}/_field_caps?fields=*&include_unmapped=true
+```
+
+**Expect:** from the first, the field aliases present on that index, each with its `path`. From the second, one entry per field name you asked about, with unmapped field names returned under `unmapped`.
+
+> ⚠️ **`include_unmapped=true` is the parameter that makes this check work.** Without it an absent field is simply missing from the response, which renders identically to a field that is present and fine. Its default is `false`.
+
+**Branch.**
+
+- **A rule field name comes back under `unmapped`, or has no alias on `${INDEX}`** → that rule is skipped on every evaluation of that index, with no error and no alert. Count the affected rules against the detector's rule-array sum and carry the ratio: it is the share of that detector's coverage that is inert. Go to `security-analytics-detector-mapping-audit`.
+- **Every rule field resolves** → the plumbing is intact for this index. Note that this is a statement about `${INDEX}` only; repeat it per member index of the alias, because the detector resolves one index and assumes the rest match.
+- **Two detectors on one alias map the same rule field to different `path` values** → whichever saved last is the one in force, and the other detector is matching nothing on that field. Go to `security-analytics-field-alias-template-recovery`.
+
+**A ratio of zero on the write index is not a clean result for the detector.** The write index is the one most likely to be correct, because it is the one a recent save resolved. The members that predate the save are where the gap sits.
+
 ## Validation
 
 This procedure produces a judgement about a whole fleet, so validation confirms the judgement is trustworthy rather than that a system recovered. Run all four before reporting any result, and especially before reporting a clean one.
@@ -259,8 +363,13 @@ This procedure produces a judgement about a whole fleet, so validation confirms 
    ```
    **Expect:** the value of `plugins.security_analytics.filter_by_backend_roles`. Where it is enabled, state in your results that the sweep covered only the detectors your backend role can see.
 4. **The two enumerations agree.** Compare step 1's hit count against step 2's. **Expect:** the same number. A difference is itself a finding and goes in the results rather than being reconciled silently.
+5. **The template reads were not blind.** This is the check that decides whether step 6's four flags mean anything.
+   ```
+   GET /_component_template/*alias-mappings*
+   ```
+   **Expect:** at least one component template carrying `"type": "alias"` entries. That is the positive control from the step 6 warning. An empty result for every alias means the read cannot see what you are asking about, and every step 6 flag is **not evaluated** rather than clean.
 
-**Exit criteria.** You can state, for every detector the enumeration returned, which flags it carries and which runbook each flag routes to — plus the three figures that bound the sweep: detectors enumerated, detectors flagged, and whether the backend-role filter was limiting what you could see. A single flagged detector is not the exit condition; the audit is complete when every detector has a record, including the ones with no flags.
+**Exit criteria.** You can state, for every detector the enumeration returned, which flags it carries and which runbook each flag routes to — plus the three figures that bound the sweep: detectors enumerated, detectors flagged, and whether the backend-role filter was limiting what you could see. Where step 6 or 7 ran, add the alias count covered and, per flagged detector, the share of its rule fields that resolve on the index you read. A single flagged detector is not the exit condition; the audit is complete when every detector has a record, including the ones with no flags.
 
 ## If this does not work
 
@@ -268,7 +377,7 @@ This procedure produces a judgement about a whole fleet, so validation confirms 
 
 **Reach out to:** your OpenSearch support channel, through the route your organisation uses for a production cluster.
 
-**Attach:** the detector count and the flagged count, the per-detector flag table from step 3, the `docs.count` and hit count that show the configuration read was or was not scrubbed, the backend-role filter value, the engine and alerting plugin versions from `GET /` and `GET /_cat/plugins?v&h=name,component,version`, and the requested-versus-returned sizes that show the enumeration was complete. State explicitly that the `_execute` route was not used and why.
+**Attach:** the detector count and the flagged count, the per-detector flag table from step 3, the `docs.count` and hit count that show the configuration read was or was not scrubbed, the backend-role filter value, the engine and alerting plugin versions from `GET /` and `GET /_cat/plugins?v&h=name,component,version`, and the requested-versus-returned sizes that show the enumeration was complete. Where step 6 or 7 ran, add the alias-to-template mapping you derived, the component-template contents with the positive control that proves the read worked, and the unresolved rule fields per flagged detector. State explicitly that the `_execute` route was not used, that no `POST` was made to the mappings route, and why.
 
 ## Related runbooks
 
@@ -278,6 +387,7 @@ Siblings are referred to by name, which resolves to a directory and is greppable
 - `security-analytics-detector-disable-verification` — where a detector reports disabled. Reads the workflow flag back and repairs a stale one.
 - `security-analytics-rule-coverage-audit` — where a detector carries more than ten rules. Establishes whether your build truncates the evaluation.
 - `security-analytics-alias-write-index-recovery` — where the data source is an alias with no explicit write index.
+- `security-analytics-field-alias-template-recovery` — where an alias's component template is empty or short, where it is listed on a template that does not create that alias's indices, where two alias names collide by prefix, or where two detectors on one alias map a rule field to different paths.
 - `security-analytics-detector-mapping-audit` — where a detector is enabled, not failing, and producing nothing. This sweep establishes configuration state; that one establishes whether an evaluated rule could have matched. Shares the step 1 enumeration.
 - `security-analytics-percolate-failure-investigation` — where error-state alerts exist. The evaluation is being rejected rather than silently truncated.
 - `security-analytics-rule-cost-audit` — where detectors are producing findings normally but driving sustained load. Same enumeration, a cost question rather than a health one.
