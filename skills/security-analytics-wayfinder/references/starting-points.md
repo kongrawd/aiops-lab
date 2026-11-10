@@ -105,6 +105,7 @@ A remediation usually destroys the evidence of its own necessity.
 | Cumulative rejection counters | Process restart | Before the bounce only |
 | Thread age (`elapsed` in a dump) | Restart | Before the bounce. It is what correlates a stuck thread to its trigger |
 | The mapping before-state | Re-applying mappings | One-shot, between the conflict and any fix. Without it the cause has to be argued from product behaviour rather than read from data |
+| The component template's contents, and which index template carries it | Any field-mappings save — including opening the Dashboards *Edit field mappings* page, which issues one on open | One-shot. The save overwrites the component template from a single index and can move which template composes it, so the state that explains the fault is gone and the post-repair reads look healthy |
 | The conflicting index pair | Retention deleting the older member | Only while both exist — bounded by the retention period on those indexes |
 | Reachability of findings and alerts | Recreating the detector | The documents survive, keyed to the old detector id. Record that id first, or no detector-scoped read reaches them again |
 | An orphaned resource under investigation | The customer cleaning it up | A resource deleted before anyone inspects it cannot be investigated afterwards — ask for the capture before the cleanup |

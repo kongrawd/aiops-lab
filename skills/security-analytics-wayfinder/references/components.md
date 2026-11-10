@@ -159,22 +159,32 @@ An unset `is_write_index` renders as a literal `-`.
 
 **What it owns.** Whether an evaluated rule can match anything. A rule referencing a field the index does not carry cannot match.
 
-**Read it — four calls:**
+**Read it — five calls:**
 
 ```
 POST /_plugins/_security_analytics/detectors/_search
 GET _cat/aliases/${ALIAS}?v&h=alias,index,is_write_index
 GET /_plugins/_security_analytics/mappings?index_name=${INDEX}
 GET ${INDEX}/_field_caps?fields=*&include_unmapped=true
+GET /_component_template/*alias-mappings*
 ```
 
 The third and fourth run **per concrete index**. `include_unmapped=true` matters: without it an absent field is simply missing from the response, which reads the same as a field that is present and fine.
+
+The fifth reads the component template surface, which the per-index reads do not cover. Confirm it against the `composed_of` of the template that creates the alias's indices.
+
+> ⚠️ **`GET` on the mappings route is the read. `POST` to the same path is a write.** Use the `GET` form here.
 
 **Then compare mappings across every index in scope — because the detector does not.** It resolves its data source to **one** concrete index and reads mappings only from that: for an alias or a data stream, the write index; for an index pattern, the newest index by creation date. It then assumes every other index shares those mappings.
 
 So a type divergence across alias members is never compared and never reported. **A detector can be correctly mapped against its write index and blind on every other member**, and nothing in its own state reflects that. The comparison is yours to make.
 
 **Reading the detector's mappings after a repair proves nothing.** The informative capture is taken while the fault is live.
+
+**Where a detector's field aliases are stored.** Two surfaces hold them, and they are separate objects from the index mapping itself:
+
+- **A plugin-owned component template**, named `.opensearch-sap-alias-mappings-component-<alias>`, listed in the `composed_of` of an index template. Discover the name rather than assuming it — it is plugin-internal.
+- **The operator's own index template**, where the same aliases may also be declared.
 
 **An index template is the remedy**, making every index that rolls over carry identical mappings at creation — which is what makes the detector's one-index assumption safe.
 
