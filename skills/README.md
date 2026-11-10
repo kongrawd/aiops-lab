@@ -2,10 +2,16 @@
 
 Agent skills published from this repository. Each directory is a self-contained skill with `SKILL.md` at its root, loadable on its own.
 
+| Skill | What it does |
+| --- | --- |
+| `operational-runbook` | Turn established knowledge or a past incident into runbooks an operator can execute and that are safe to publish |
+| `security-analytics-wayfinder` | Select which OpenSearch Security Analytics runbook addresses a symptom, routing on a discriminating read rather than on wording |
+
 ## Install
 
 ```bash
 SKILL_BASE_URL=https://github.com/kongrawd/aiops-lab/tree/main npx skill skills/operational-runbook
+SKILL_BASE_URL=https://github.com/kongrawd/aiops-lab/tree/main npx skill skills/security-analytics-wayfinder
 ```
 
 ## What a skill here looks like
